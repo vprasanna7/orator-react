@@ -1,55 +1,50 @@
 import React, { useEffect, useState } from 'react';
-import io from 'socket.io-client';
 
-function Transcript() {
+function Transcript({ socket }) {
   const [transcript, setTranscript] = useState('');
   const [partialTranscript, setPartialTranscript] = useState('');
 
   useEffect(() => {
-    const socket = io('http://localhost:5000');
+    console.log('Transcript component mounted');
+    console.log('Socket prop:', socket);
 
-    socket.on('connect', () => {
-      console.log('Connected to server');
-    });
+    if (!socket) return;
 
-    socket.on('disconnect', () => {
-      console.log('Disconnected from server');
-    });
-
-    socket.on('transcription', (data) => {
-      console.log('Received transcript data:', data);
+    const handleTranscription = (data) => {
+      console.log('Received live transcript data in Transcript component:', data);
       if (data.type === 'FinalTranscript') {
-        setTranscript(prev => prev + data.text + '\n');
+        setTranscript(prev => {
+          const newTranscript = prev + data.text + '\n';
+          console.log('Updated final transcript:', newTranscript);
+          return newTranscript;
+        });
         setPartialTranscript('');
-      } else if (data.type === 'PartialTranscript') {
+      } else if (data.type === 'PartialTranscript' || data.type === 'TestTranscript') {
+        console.log('Updating partial transcript:', data.text);
         setPartialTranscript(data.text);
       }
-    });
+    };
 
-    socket.on('error', (error) => {
-      console.error('Socket error:', error);
-    });
+    socket.on('live_transcription', handleTranscription);
+    console.log('Subscribed to live_transcription events');
 
-    socket.on('connection_closed', (data) => {
-      console.log('Connection closed:', data);
-    });
-
-    socket.on('session_terminated', () => {
-      console.log('Session terminated');
-      setPartialTranscript('');
+    // Add this line to log all events
+    socket.onAny((event, ...args) => {
+      console.log(`Received event "${event}" in Transcript:`, args);
     });
 
     return () => {
-      socket.disconnect();
+      socket.off('live_transcription', handleTranscription);
+      console.log('Unsubscribed from live_transcription events');
     };
-  }, []);
+  }, [socket]);
 
   return (
     <div>
-      <h1>Transcript</h1>
-      <pre>{transcript}</pre>
-      <h2>Partial Transcript</h2>
-      <pre>{partialTranscript}</pre>
+      <h2>Transcript</h2>
+      <pre style={{whiteSpace: 'pre-wrap', wordWrap: 'break-word'}}>{transcript || "No transcript yet."}</pre>
+      <h3>Partial Transcript</h3>
+      <pre style={{whiteSpace: 'pre-wrap', wordWrap: 'break-word'}}>{partialTranscript || "No partial transcript yet."}</pre>
     </div>
   );
 }

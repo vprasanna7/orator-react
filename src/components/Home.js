@@ -1,123 +1,93 @@
-import React, { useState } from 'react';
-import { Button, Container, Typography, Box, Input } from '@mui/material';
+import React, { useState, useEffect } from 'react';
+import io from 'socket.io-client';
+import { Container, Typography, Button, Box } from '@mui/material';
 import Transcript from './Transcript';
 
 const Home = () => {
-  const [file, setFile] = useState(null);
-  const [transcriptId, setTranscriptId] = useState(null);
-  const [transcript, setTranscript] = useState('');
+  const [socket, setSocket] = useState(null);
+  const [connectionStatus, setConnectionStatus] = useState('Disconnected');
 
-  const startTranscription = async () => {
-    console.log('Starting transcription');
-    try {
-      const response = await fetch('http://localhost:5000/start', { 
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+  useEffect(() => {
+    const newSocket = io('http://localhost:5000', {
+      transports: ['websocket'],
+    });
+
+    newSocket.on('connect', () => {
+      console.log('Connected to server');
+      setConnectionStatus('Connected');
+    });
+
+    newSocket.on('disconnect', () => {
+      console.log('Disconnected from server');
+      setConnectionStatus('Disconnected');
+    });
+
+    newSocket.on('live_transcription', (data) => {
+      console.log('Received live transcription in Home:', data);
+    });
+
+    // Add this line to log all events
+    newSocket.onAny((event, ...args) => {
+      console.log(`Received event "${event}" in Home:`, args);
+    });
+
+    setSocket(newSocket);
+    console.log('Socket object created:', newSocket);
+
+    return () => newSocket.close();
+  }, []);
+
+  const startTranscription = () => {
+    if (socket) {
+      console.log('Starting transcription');
+      socket.emit('start_transcription', (response) => {
+        console.log('Start transcription response:', response);
       });
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || 'Failed to start transcription');
-      }
-      console.log('Transcription started');
-    } catch (error) {
-      console.error('Failed to start transcription', error);
     }
   };
 
-  const stopTranscription = async () => {
-    console.log('Stopping transcription');
-    try {
-      const response = await fetch('http://localhost:5000/stop', { method: 'POST' });
-      if (!response.ok) {
-        throw new Error('Failed to stop transcription');
-      }
-      console.log('Transcription stopped');
-    } catch (error) {
-      console.error('Failed to stop transcription', error);
-    }
-  };
-
-  const handleFileChange = (event) => {
-    setFile(event.target.files[0]);
-  };
-
-  const uploadFile = async () => {
-    if (!file) {
-      console.error('No file selected');
-      return;
-    }
-
-    const formData = new FormData();
-    formData.append('file', file);
-
-    try {
-      const response = await fetch('http://localhost:5000/upload', {
-        method: 'POST',
-        body: formData,
+  const stopTranscription = () => {
+    if (socket) {
+      console.log('Stopping transcription');
+      socket.emit('stop_transcription', (response) => {
+        console.log('Stop transcription response:', response);
       });
-
-      if (!response.ok) {
-        throw new Error('File upload failed');
-      }
-
-      const data = await response.json();
-      setTranscriptId(data.transcript_id);
-      console.log('File uploaded, transcript ID:', data.transcript_id);
-    } catch (error) {
-      console.error('Error uploading file:', error);
     }
   };
 
-  const getTranscript = async () => {
-    if (!transcriptId) {
-      console.error('No transcript ID');
-      return;
+  const testSocket = () => {
+    if (socket) {
+      console.log('Testing socket');
+      socket.emit('test_socket', (response) => {
+        console.log('Test socket response:', response);
+      });
     }
+  };
 
-    try {
-      const response = await fetch(`http://localhost:5000/transcript/${transcriptId}`);
-      const data = await response.json();
-
-      if (response.status === 200) {
-        setTranscript(data.transcript);
-      } else if (response.status === 202) {
-        console.log('Transcription in progress:', data.status);
-      } else {
-        throw new Error('Failed to get transcript');
-      }
-    } catch (error) {
-      console.error('Error getting transcript:', error);
-    }
+  const testEmit = () => {
+    console.log('Testing event emission');
+    fetch('http://localhost:5000/test_emit', {
+      method: 'GET',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    })
+      .then(response => response.json())
+      .then(data => console.log('Test emit response:', data))
+      .catch(error => console.error('Error:', error));
   };
 
   return (
     <Container>
       <Typography variant="h4">Live Transcription</Typography>
+      <Typography>Connection Status: {connectionStatus}</Typography>
       <Button variant="contained" color="primary" onClick={startTranscription}>Start Live</Button>
       <Button variant="contained" color="secondary" onClick={stopTranscription}>Stop Live</Button>
-      
+      <Button variant="contained" color="info" onClick={testSocket}>Test Socket</Button>
+      <Button variant="contained" color="warning" onClick={testEmit}>Test Emit</Button>
       <Box mt={2}>
-        <Input type="file" onChange={handleFileChange} />
-        <Button variant="contained" color="primary" onClick={uploadFile}>Upload File</Button>
-      </Box>
-      
-      {transcriptId && (
-        <Box mt={2}>
-          <Button variant="contained" color="primary" onClick={getTranscript}>Get Transcript</Button>
-        </Box>
-      )}
-      
-      {transcript && (
-        <Box mt={2}>
-          <Typography variant="h6">File Transcript:</Typography>
-          <pre>{transcript}</pre>
-        </Box>
-      )}
-      
-      <Box mt={2}>
-        <Transcript />
+        {socket ? <Transcript socket={socket} /> : <Typography>Connecting...</Typography>}
       </Box>
     </Container>
   );

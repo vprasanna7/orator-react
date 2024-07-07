@@ -1,182 +1,125 @@
 import os
-import logging
 import json
-import threading
-import requests
+import logging
 import pyaudio
 import websocket
-from flask import Flask, request, jsonify
+import threading
+from flask import Flask, jsonify
 from flask_socketio import SocketIO
-from werkzeug.utils import secure_filename
 from flask_cors import CORS
 
+# Set up logging
 logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
+# Flask setup
 app = Flask(__name__)
-CORS(app)
-socketio = SocketIO(app, cors_allowed_origins="*")
+CORS(app, resources={r"/*": {"origins": "http://localhost:3000"}}, supports_credentials=True)
+socketio = SocketIO(app, cors_allowed_origins="http://localhost:3000", async_mode=None)
 
-# Hard-coded API Key
+# AssemblyAI setup
 API_KEY = "6da73691953e46efa30f69ecf9e39009"
-
 FRAMES_PER_BUFFER = 3200
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
 SAMPLE_RATE = 16000
-p = pyaudio.PyAudio()
-stream = p.open(format=FORMAT, channels=CHANNELS, rate=SAMPLE_RATE, input=True, frames_per_buffer=FRAMES_PER_BUFFER)
 
-stop_event = threading.Event()
+# PyAudio setup
+audio = pyaudio.PyAudio()
+stream = audio.open(
+    format=FORMAT,
+    channels=CHANNELS,
+    rate=SAMPLE_RATE,
+    input=True,
+    frames_per_buffer=FRAMES_PER_BUFFER
+)
 
-UPLOAD_FOLDER = 'uploads'
-ALLOWED_EXTENSIONS = {'wav', 'mp3', 'ogg', 'flac'}
+stop_audio = threading.Event()
 
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+@socketio.on('connect')
+def handle_connect():
+    logger.info('Client connected')
 
-def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+@socketio.on('disconnect')
+def handle_disconnect():
+    logger.info('Client disconnected')
 
-@app.route('/start', methods=['POST'])
-def start_transcription():
-    logging.debug("Received request to start transcription")
-    stop_event.clear()
+@socketio.on('start_transcription')
+def handle_start_transcription():
+    global stop_audio
+    stop_audio.clear()
     threading.Thread(target=transcribe_worker).start()
-    return jsonify(success=True)
+    logger.info('Transcription started')
+    return {'status': 'started'}
 
-@app.route('/stop', methods=['POST'])
-def stop_transcription():
-    logging.debug("Received request to stop transcription")
-    stop_event.set()
-    return jsonify(success=True)
-
-@app.route('/upload', methods=['POST'])
-def upload_file():
-    if 'file' not in request.files:
-        return jsonify({'error': 'No file part'}), 400
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({'error': 'No selected file'}), 400
-    if file and allowed_file(file.filename):
-        filename = secure_filename(file.filename)
-        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        file.save(filepath)
-
-        headers = {
-            "authorization": API_KEY,
-            "content-type": "application/json"
-        }
-        upload_response = requests.post(
-            "https://api.assemblyai.com/v2/upload",
-            headers=headers,
-            data=open(filepath, "rb")
-        )
-
-        if upload_response.status_code == 200:
-            audio_url = upload_response.json()["upload_url"]
-
-            transcript_response = requests.post(
-                "https://api.assemblyai.com/v2/transcript",
-                headers=headers,
-                json={"audio_url": audio_url}
-            )
-
-            if transcript_response.status_code == 200:
-                transcript_id = transcript_response.json()['id']
-                return jsonify({'transcript_id': transcript_id}), 200
-            else:
-                return jsonify({'error': 'Failed to start transcription job'}), 500
-        else:
-            return jsonify({'error': 'Failed to upload audio file'}), 500
-    return jsonify({'error': 'File type not allowed'}), 400
-
-@app.route('/transcript/<transcript_id>', methods=['GET'])
-def get_transcript(transcript_id):
-    headers = {
-        "authorization": API_KEY,
-    }
-    response = requests.get(
-        f"https://api.assemblyai.com/v2/transcript/{transcript_id}",
-        headers=headers
-    )
-
-    if response.status_code == 200:
-        transcript_data = response.json()
-        if transcript_data['status'] == 'completed':
-            return jsonify({'transcript': transcript_data['text']}), 200
-        else:
-            return jsonify({'status': transcript_data['status']}), 202
-    else:
-        return jsonify({'error': 'Failed to get transcript'}), 500
+@socketio.on('stop_transcription')
+def handle_stop_transcription():
+    global stop_audio
+    stop_audio.set()
+    logger.info('Transcription stopped')
+    return {'status': 'stopped'}
 
 def transcribe_worker():
-    logging.info("Audio streaming thread started")
+    headers = {
+        'authorization': API_KEY,
+    }
+    url = f"wss://api.assemblyai.com/v2/realtime/ws?sample_rate={SAMPLE_RATE}"
+
+    def on_message(ws, message):
+        try:
+            data = json.loads(message)
+            logger.info(f"Received message from AssemblyAI: {data}")
+            if 'text' in data:
+                logger.info(f"Transcription received: {data['text']}")
+                event_data = {'text': data['text'], 'type': data.get('message_type')}
+                logger.info(f"Emitting live_transcription event: {event_data}")
+                socketio.emit('live_transcription', event_data, namespace='/')
+                logger.info(f"Emission complete. Event data: {event_data}")
+        except Exception as e:
+            logger.error(f"Error in on_message: {str(e)}")
+
+    def on_error(ws, error):
+        logger.error(f"WebSocket error: {error}")
+
+    def on_close(ws, close_status_code, close_msg):
+        logger.info(f"WebSocket closed: {close_status_code} - {close_msg}")
+
+    def on_open(ws):
+        logger.info("WebSocket connection opened to AssemblyAI")
+        def send_audio():
+            while not stop_audio.is_set():
+                try:
+                    data = stream.read(FRAMES_PER_BUFFER)
+                    ws.send(data, opcode=websocket.ABNF.OPCODE_BINARY)
+                except Exception as e:
+                    logger.error(f"Error sending audio data: {str(e)}")
+                    break
+            logger.info("Stopped sending audio data")
+        threading.Thread(target=send_audio).start()
+
     ws = websocket.WebSocketApp(
-        f"wss://api.assemblyai.com/v2/realtime/ws?sample_rate={SAMPLE_RATE}",
-        header={"Authorization": API_KEY},
+        url,
+        header=headers,
         on_message=on_message,
-        on_open=on_open,
         on_error=on_error,
-        on_close=on_close
+        on_close=on_close,
+        on_open=on_open
     )
     ws.run_forever()
 
-def on_open(ws):
-    logging.info("WebSocket connection opened successfully")
-    def run(*args):
-        logging.info("Audio streaming thread started")
-        chunk_count = 0
-        while not stop_event.is_set():
-            try:
-                data = stream.read(FRAMES_PER_BUFFER)
-                ws.send(data, opcode=websocket.ABNF.OPCODE_BINARY)
-                chunk_count += 1
-                if chunk_count % 100 == 0:
-                    logging.debug(f"Sent {chunk_count} audio chunks")
-            except Exception as e:
-                logging.error(f"Error reading or sending audio data: {str(e)}")
-    threading.Thread(target=run).start()
+@socketio.on('test_socket')
+def test_socket():
+    logger.info("Emitting test transcription event")
+    socketio.emit('live_transcription', {'text': 'Test message', 'type': 'TestTranscript'}, namespace='/')
+    logger.info("Emitted test live_transcription event")
+    return {'status': 'test_sent'}
 
-def on_message(ws, message):
-    logging.debug(f"Received message from AssemblyAI: {message}")
-    try:
-        response = json.loads(message)
-        message_type = response.get('message_type')
+@app.route('/test_emit')
+def test_emit():
+    test_data = {'text': 'This is a test emission', 'type': 'TestTranscript'}
+    socketio.emit('live_transcription', test_data, namespace='/')
+    logger.info(f"Test emit sent: {test_data}")
+    return jsonify({'message': 'Test emission sent'})
 
-        if message_type in ['PartialTranscript', 'FinalTranscript']:
-            text = response['text']
-            confidence = response.get('confidence')
-            audio_start = response.get('audio_start')
-            audio_end = response.get('audio_end')
-
-            logging.info(f"{message_type}: {text} (Confidence: {confidence}, Time: {audio_start}-{audio_end}ms)")
-            socketio.emit('transcription', {
-                'type': message_type,
-                'text': text,
-                'confidence': confidence,
-                'audio_start': audio_start,
-                'audio_end': audio_end
-            })
-        elif message_type == 'SessionTerminated':
-            logging.info("Session terminated by AssemblyAI")
-            socketio.emit('session_terminated')
-        else:
-            logging.warning(f"Unhandled message type: {message_type}")
-
-    except json.JSONDecodeError:
-        logging.error(f"Failed to decode message: {message}")
-    except KeyError as e:
-        logging.error(f"Missing expected key in message: {str(e)}")
-    except Exception as e:
-        logging.error(f"Error processing message: {str(e)}")
-
-def on_error(ws, error):
-    logging.error(f"WebSocket error: {str(error)}")
-    socketio.emit('error', {'message': 'An error occurred with the transcription service'})
-
-def on_close(ws, close_status_code, close_msg):
-    logging.info(f"WebSocket closed. Status code: {close_status_code}, Message: {close_msg}")
-    socketio.emit('connection_closed', {'status_code': close_status_code, 'message': close_msg})
-
-if __name__ == "__main__":
-    logging.info("Starting Flask server")
-    socketio.run(app, host='127.0.0.1', port=5000)
+if __name__ == '__main__':
+    socketio.run(app, debug=True, host='0.0.0.0', port=5000)
